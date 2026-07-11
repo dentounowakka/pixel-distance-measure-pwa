@@ -1,0 +1,21 @@
+{
+  "name": "画像距離測定",
+  "short_name": "距離測定",
+  "description": "画像上の2点間距離をpxとmmで測定します。",
+  "lang": "ja",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#e8ece9",
+  "theme_color": "#1d4f4a",
+  "icons": [
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
