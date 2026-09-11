@@ -28,6 +28,9 @@ const stage = $("#canvasStage");
 let viewport = { width: 1, height: 1, dpr: 1 };
 let imageBounds = { x: 0, y: 0, width: 1, height: 1 };
 let pointerAction = null;
+let pinchAction = null;
+const activePointers = new Map();
+const suppressedPointers = new Set();
 let saveTimer = null;
 
 function openDatabase() {
@@ -134,6 +137,20 @@ function fitScale() {
   return Math.min((viewport.width - padding * 2) / size.width, (viewport.height - padding * 2) / size.height, 1);
 }
 
+function updateImageBounds() {
+  const size = baseImageSize();
+  imageBounds = {
+    x: (viewport.width - size.width * state.zoom) / 2,
+    y: (viewport.height - size.height * state.zoom) / 2,
+    width: size.width * state.zoom,
+    height: size.height * state.zoom
+  };
+}
+
+function clampZoom(zoom) {
+  return Math.min(Math.max(zoom, Math.max(fitScale() * 0.25, 0.01)), 8);
+}
+
 function worldToScreen(point) {
   return {
     x: imageBounds.x + (point.x + state.viewOffset.x) * state.zoom,
@@ -146,6 +163,21 @@ function screenToWorld(point) {
     x: (point.x - imageBounds.x) / state.zoom - state.viewOffset.x,
     y: (point.y - imageBounds.y) / state.zoom - state.viewOffset.y
   };
+}
+
+function zoomAt(screenPoint, requestedZoom, anchorWorld = screenToWorld(screenPoint)) {
+  const previousZoom = state.zoom;
+  const previousOffset = state.viewOffset;
+  const nextZoom = clampZoom(requestedZoom);
+  state.zoom = nextZoom;
+  updateImageBounds();
+  state.viewOffset = {
+    x: (screenPoint.x - imageBounds.x) / state.zoom - anchorWorld.x,
+    y: (screenPoint.y - imageBounds.y) / state.zoom - anchorWorld.y
+  };
+  return Math.abs(state.zoom - previousZoom) > 0.000001
+    || Math.abs(state.viewOffset.x - previousOffset.x) > 0.000001
+    || Math.abs(state.viewOffset.y - previousOffset.y) > 0.000001;
 }
 
 function distance(line) {
@@ -182,13 +214,7 @@ function drawLine(line, color, label) {
 
 function draw() {
   ctx.clearRect(0, 0, viewport.width, viewport.height);
-  const size = baseImageSize();
-  imageBounds = {
-    x: (viewport.width - size.width * state.zoom) / 2,
-    y: (viewport.height - size.height * state.zoom) / 2,
-    width: size.width * state.zoom,
-    height: size.height * state.zoom
-  };
+  updateImageBounds();
 
   const drawImage = (record, opacity, offset = { x: 0, y: 0 }) => {
     if (!record) return;
@@ -289,22 +315,56 @@ function eventPoint(event) {
   return { x: event.clientX - rect.left, y: event.clientY - rect.top };
 }
 
-canvas.addEventListener("pointerdown", (event) => {
-  if (!state.image1 && !state.image2) return;
-  canvas.setPointerCapture(event.pointerId);
-  const screen = eventPoint(event);
-  if (state.mode === "align") {
-    if (!state.image2) return;
-    pointerAction = { type: "align", start: screen, original: { ...state.image2Offset } };
-    stage.classList.add("dragging");
+function pointerPair() {
+  return [...activePointers.entries()].slice(0, 2);
+}
+
+function pairGeometry(pair) {
+  const [, first] = pair[0];
+  const [, second] = pair[1];
+  return {
+    center: { x: (first.x + second.x) / 2, y: (first.y + second.y) / 2 },
+    distance: Math.max(Math.hypot(second.x - first.x, second.y - first.y), 1)
+  };
+}
+
+function beginPinch() {
+  if (activePointers.size < 2) return;
+
+  if (pointerAction?.type === "align") state.image2Offset = { ...pointerAction.original };
+  if (pointerAction?.type === "pan") state.viewOffset = { ...pointerAction.original };
+
+  const pair = pointerPair();
+  const geometry = pairGeometry(pair);
+  pointerAction = null;
+  pinchAction = {
+    pointerIds: pair.map(([pointerId]) => pointerId),
+    startDistance: geometry.distance,
+    startZoom: state.zoom,
+    anchorWorld: screenToWorld(geometry.center)
+  };
+  activePointers.forEach((_, pointerId) => suppressedPointers.add(pointerId));
+  stage.classList.add("dragging");
+  draw();
+  updateResults();
+}
+
+function updatePinch() {
+  if (!pinchAction) return;
+  const pair = pinchAction.pointerIds.map((pointerId) => [pointerId, activePointers.get(pointerId)]);
+  if (pair.some(([, point]) => !point)) {
+    beginPinch();
     return;
   }
-  if (event.button === 1 || event.altKey) {
-    pointerAction = { type: "pan", start: screen, original: { ...state.viewOffset } };
-    stage.classList.add("dragging");
-    return;
-  }
-  const point = screenToWorld(screen);
+
+  const geometry = pairGeometry(pair);
+  zoomAt(geometry.center, pinchAction.startZoom * geometry.distance / pinchAction.startDistance, pinchAction.anchorWorld);
+  $("#zoomValue").textContent = `${Math.round(state.zoom / fitScale() * 100)}%`;
+  draw();
+  updateResults();
+}
+
+function setMeasurementPoint(point) {
   if (!state.pendingPoint) {
     state.pendingPoint = point;
   } else {
@@ -315,36 +375,99 @@ canvas.addEventListener("pointerdown", (event) => {
     scheduleSave();
   }
   render();
+}
+
+canvas.addEventListener("pointerdown", (event) => {
+  if (!state.image1 && !state.image2) return;
+  if (event.pointerType === "touch") event.preventDefault();
+  canvas.setPointerCapture(event.pointerId);
+  const screen = eventPoint(event);
+  activePointers.set(event.pointerId, screen);
+
+  if (activePointers.size >= 2) {
+    beginPinch();
+    return;
+  }
+
+  if (state.mode === "align") {
+    if (!state.image2) return;
+    pointerAction = { type: "align", pointerId: event.pointerId, start: screen, original: { ...state.image2Offset } };
+    stage.classList.add("dragging");
+    return;
+  }
+  if (event.button === 1 || event.altKey) {
+    pointerAction = { type: "pan", pointerId: event.pointerId, start: screen, original: { ...state.viewOffset } };
+    stage.classList.add("dragging");
+    return;
+  }
+  pointerAction = { type: "tap", pointerId: event.pointerId, start: screen, moved: false };
 });
 
 canvas.addEventListener("pointermove", (event) => {
+  if (event.pointerType === "touch") event.preventDefault();
   const screen = eventPoint(event);
   const world = screenToWorld(screen);
   $("#pointerPosition").textContent = `x: ${world.x.toFixed(1)} / y: ${world.y.toFixed(1)}`;
-  if (!pointerAction) return;
+  if (activePointers.has(event.pointerId)) activePointers.set(event.pointerId, screen);
+  if (pinchAction) {
+    updatePinch();
+    return;
+  }
+  if (!pointerAction || pointerAction.pointerId !== event.pointerId) return;
   const dx = (screen.x - pointerAction.start.x) / state.zoom;
   const dy = (screen.y - pointerAction.start.y) / state.zoom;
+  if (pointerAction.type === "tap") {
+    pointerAction.moved ||= Math.hypot(screen.x - pointerAction.start.x, screen.y - pointerAction.start.y) > 8;
+    return;
+  }
   if (pointerAction.type === "align") state.image2Offset = { x: pointerAction.original.x + dx, y: pointerAction.original.y + dy };
-  else state.viewOffset = { x: pointerAction.original.x + dx, y: pointerAction.original.y + dy };
+  if (pointerAction.type === "pan") state.viewOffset = { x: pointerAction.original.x + dx, y: pointerAction.original.y + dy };
   draw(); updateResults();
 });
 
-function finishPointer() {
-  if (pointerAction) scheduleSave();
-  pointerAction = null;
+function finishPointer(event, cancelled = false) {
+  if (event.pointerType === "touch") event.preventDefault();
+  const screen = eventPoint(event);
+  const wasSuppressed = suppressedPointers.has(event.pointerId);
+  activePointers.delete(event.pointerId);
+  suppressedPointers.delete(event.pointerId);
+
+  if (pinchAction || wasSuppressed) {
+    if (activePointers.size >= 2) beginPinch();
+    else {
+      pinchAction = null;
+      pointerAction = null;
+      stage.classList.remove("dragging");
+      scheduleSave();
+    }
+    return;
+  }
+
+  if (pointerAction?.pointerId === event.pointerId) {
+    if (!cancelled && pointerAction.type === "tap" && !pointerAction.moved) {
+      setMeasurementPoint(screenToWorld(screen));
+    } else if (pointerAction.type !== "tap") {
+      scheduleSave();
+    }
+    pointerAction = null;
+  }
   stage.classList.remove("dragging");
 }
-canvas.addEventListener("pointerup", finishPointer);
-canvas.addEventListener("pointercancel", finishPointer);
+canvas.addEventListener("pointerup", (event) => finishPointer(event));
+canvas.addEventListener("pointercancel", (event) => finishPointer(event, true));
 canvas.addEventListener("pointerleave", () => { if (!pointerAction) $("#pointerPosition").textContent = "x: — / y: —"; });
 canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+canvas.addEventListener("touchstart", (event) => event.preventDefault(), { passive: false });
+canvas.addEventListener("touchmove", (event) => event.preventDefault(), { passive: false });
 
 stage.addEventListener("wheel", (event) => {
   if (!state.image1 && !state.image2) return;
   event.preventDefault();
-  const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
-  state.zoom = Math.min(Math.max(state.zoom * factor, fitScale() * 0.25), 8);
-  render(); scheduleSave();
+  const factor = Math.min(Math.max(Math.exp(-event.deltaY * 0.002), 0.75), 1.33);
+  if (zoomAt(eventPoint(event), state.zoom * factor)) {
+    render();
+    scheduleSave();
+  }
 }, { passive: false });
 
 $("#imageInput1").addEventListener("change", (event) => selectImage("image1", event.target.files[0]));
@@ -391,7 +514,7 @@ $("#clearAll").addEventListener("click", async () => {
 });
 
 function changeZoom(factor) {
-  state.zoom = Math.min(Math.max(state.zoom * factor, fitScale() * 0.25), 8);
+  state.zoom = clampZoom(state.zoom * factor);
   render(); scheduleSave();
 }
 $("#zoomIn").addEventListener("click", () => changeZoom(1.2));

@@ -134,7 +134,16 @@ input[type="range"] { width: 100%; margin: 0; accent-color: var(--primary); }
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
 }
 
-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
 .canvas-stage[data-mode="measure"] canvas, .canvas-stage[data-mode="reference"] canvas { cursor: crosshair; }
 .canvas-stage[data-mode="align"] canvas { cursor: grab; }
 .canvas-stage.dragging canvas { cursor: grabbing; }
